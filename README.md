@@ -74,11 +74,31 @@ who they are, so they only do it once.
 While two students are on the spot, everyone else can answer along on their own
 phone for practice. Those answers are stored separately and never scored.
 
-A name belongs to the first phone that picks it, so nobody can answer as
-someone else. If a student changes phone or clears their browser, press
-**Release** beside their name on the class list page and they can pick it
-again. **Release all phones** does the whole class, which is the quickest fix
-if something has gone odd.
+### Making sure the right student answers
+
+Two ways, set per class under Settings, **How students join**.
+
+**They enter their student ID** (the default). The student picks their name,
+then types their ID to confirm. The name list never shows IDs and you cannot
+search by one, so picking a classmate's name gets nowhere without knowing their
+ID. A student who changes phone or clears their browser types the ID again and
+carries on — no teacher needed. Only one phone answers for a name at a time;
+entering the ID moves it across and the old phone stops being able to answer.
+
+**First phone to pick a name keeps it.** Nothing to remember and nothing to
+guess, but every changed or wiped phone needs you to press **Release** beside
+that student on the class list page.
+
+Either way, the class list page has a **Phone** column showing who has joined,
+with **Release** next to each and **Release all phones** at the top.
+
+A note on how strong this is. The ID check is enforced in the app, not by the
+server, because there is no server here to keep a secret on. A student who knows
+their way around a browser's developer tools could get past it. What the server
+does enforce is that only one phone can answer for a name at a time, which is
+what stops the ordinary version of this. Given the board shows every name and
+you now see answers as they come in, an impostor is hard to miss. If you would
+rather not rely on that, use the second mode.
 
 The web config keys are meant to be public. The rules are what protect the data,
 which is why step 5 matters more than it looks.
@@ -97,7 +117,8 @@ first thing that is wrong, with the fix. The usual culprits:
 | `unavailable` | No Firestore database yet. Firestore Database → Create database → **Native** mode |
 | `not-found` | The database has a name other than `(default)`. Put that name in `FIRESTORE_DATABASE_ID` in `js/config.js` |
 | Console asks you to sign in | Expected. Use the teacher account from step 6 |
-| A student sees "another phone is signed in as you" | They changed phone or cleared their browser. Class list page, **Release** next to their name |
+| A student sees "another phone is signed in as you" | Only happens in the locked mode. Class list page, **Release** next to their name |
+| A student says their ID is not accepted | Check the ID on the class list. Case, spaces, dashes and underscores are all forgiven; nothing else is |
 | Answers not saving for anyone | Class list page, **Release all phones**, then have them pick their names again |
 | Teacher sees "still thinking" forever | Republish `firestore.rules`. An older version made the teacher's live read of the answers unreliable |
 | Signs in, still refused | That account's UID is not in `admins`. The sign-in screen shows the UID to copy |
@@ -249,23 +270,29 @@ right answers and one wrong one out of three scores two thirds, not zero.
    They stay up for as many questions as the round is set to.
 2. **Ask a question.** Pick one, or press *Ask the next question* to take the
    least-used question matching your topic and difficulty filters.
-3. Students see it on their phones, choose a confidence, and lock in an answer.
-   Students who were not drawn can answer along for practice; those answers are
-   saved separately and never counted, which gives the other twenty-eight people
-   in the room something to do.
-4. **Lock and show the answer.** Everyone is graded and scored at once.
-5. **Next question**, if the round has more left, or **Next round** to draw
-   again. When a round runs over several questions, sitting out is held back
-   until the round finishes, so nobody is pulled out halfway through.
+3. Students see the whole set on their phones, choose a confidence for each,
+   and lock them all in together. Students who were not drawn can answer along
+   for practice; those answers are saved separately and never counted, which
+   gives the other twenty-eight people in the room something to do.
+4. **Lock and show the answers**, or just let the clock run out. Everything is
+   marked at once: a table of who got how many right and what it was worth,
+   then question by question with each student's answer beside it.
+5. **Next round.** Anyone who got at least one question right sits out the next
+   draws, until you bring them back.
 
 Settings worth knowing about:
 
 - **Students per round.** Two by default. Up to eight.
-- **Questions per round.** One by default. Raise it and the same drawn students
-  face that many questions before a new draw, which suits a head-to-head over a
-  few questions rather than a single sudden-death one. After each reveal the
-  button says how many are left, and **End the round and draw again** cuts it
-  short whenever you want.
+- **Questions per round.** One by default. Raise it and the drawn students get
+  that many questions **all at once** on their phones. They answer in any order
+  at their own pace and lock the whole set in together, which suits a
+  head-to-head over a few questions rather than a single sudden-death one. You
+  can let the app choose the set, or tick the ones you want in the list.
+- **Seconds per question** sets the clock for each question, so a round of
+  three at forty-five seconds runs for two and a quarter minutes. When the
+  clock runs out the round marks itself and the console shows who got what
+  right, without anyone pressing anything. Anything left unanswered counts as
+  wrong, and **Undo the scoring** is there if the timing caught someone out.
 - **How they are picked.** *Leans towards whoever has had fewest turns* is still
   a genuine draw — nobody can predict it — but it stops the same four hands
   dominating. Flat random is there if you want it.
@@ -281,10 +308,11 @@ Their score is untouched, and they drop off the scoreboard while they are out,
 so a missing student is not sitting in third place all lesson. The same thing
 can be done from the Attendance column on the class list.
 
-**While they answer**, the console shows what each drawn student has put in,
-how sure they said they were, and the points at stake either way, before you
-reveal anything. If one of them has not answered, revealing asks you to confirm
-first, since a missing answer is scored as wrong.
+**While they answer**, the console shows a grid of the drawn students against
+the questions, filling in with what each has put and how sure they said they
+were, plus a running count of how many of the set they have finished. If
+someone has not finished when you reveal, it asks you to confirm first, since
+anything blank is scored as wrong.
 
 *Undo the scoring* reverses a round if you misheard an answer.
 

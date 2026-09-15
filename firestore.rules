@@ -75,12 +75,22 @@ service cloud.firestore {
         allow write: if isTeacher();
       }
 
-      // A phone claims a seat once. After that only that phone, or a teacher,
-      // can change it.
+      // Which phone currently answers for a given name. A student may only
+      // write an answer for a seat they hold, so this is what stops one
+      // student answering as another.
+      //
+      // Whether a seat can change hands is the class's own setting. With
+      // lockToDevice off (the default) any phone may take the seat, and the
+      // app asks for the student ID first. With it on, only the holding phone
+      // or a teacher can move it.
       match /seats/{studentId} {
         allow read: if signedIn();
         allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
-        allow update, delete: if isTeacher() || resource.data.uid == request.auth.uid;
+        allow update: if isTeacher()
+          || resource.data.uid == request.auth.uid
+          || (request.resource.data.uid == request.auth.uid
+              && get(/databases/$(database)/documents/classes/$(classId)).data.settings.lockToDevice != true);
+        allow delete: if isTeacher() || resource.data.uid == request.auth.uid;
       }
 
       match /rounds/{roundId} {
