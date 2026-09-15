@@ -279,23 +279,39 @@ export async function bulkSet(collPath, items, { merge = true } = {}) {
 
 /* ---------- live updates --------------------------------------------- */
 
-export function watchDoc(path, cb) {
+export function watchDoc(path, cb, onError) {
   if (db.mode === 'cloud') {
-    return fs.onSnapshot(fs.doc(store, path), (s) => cb(s.exists() ? { id: s.id, ...s.data() } : null));
+    return fs.onSnapshot(
+      fs.doc(store, path),
+      (s) => cb(s.exists() ? { id: s.id, ...s.data() } : null),
+      (err) => reportWatchError(path, err, onError)
+    );
   }
   const run = () => { const v = local[path]; cb(v ? { id: lastSeg(path), ...v } : null); };
   listeners.add(run); run();
   return () => listeners.delete(run);
 }
 
-export function watchList(collPath, cb) {
+export function watchList(collPath, cb, onError) {
   if (db.mode === 'cloud') {
-    return fs.onSnapshot(fs.collection(store, collPath), (s) =>
-      cb(s.docs.map((d) => ({ id: d.id, ...d.data() }))));
+    return fs.onSnapshot(
+      fs.collection(store, collPath),
+      (s) => cb(s.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => reportWatchError(collPath, err, onError)
+    );
   }
   const run = () => cb(localChildren(collPath));
   listeners.add(run); run();
   return () => listeners.delete(run);
+}
+
+/* A live read that fails just stops delivering, which looks exactly like
+   "nobody has answered yet". Never let that happen quietly again. */
+function reportWatchError(path, err, onError) {
+  const info = explain(err);
+  console.error(`Quiz Arena: live read of ${path} failed.`, info.code, info.message);
+  db.lastError = { stage: `watching ${path}`, ...info };
+  if (typeof onError === 'function') onError(info);
 }
 
 /* ---------- helpers --------------------------------------------------- */

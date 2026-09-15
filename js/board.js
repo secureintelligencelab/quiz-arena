@@ -38,7 +38,9 @@ async function boot() {
 
   state.cls = await get(`classes/${state.classId}`);
   watchList(`classes/${state.classId}/students`, (rows) => {
-    state.students = rows.sort((a, b) => (b.score || 0) - (a.score || 0));
+    state.students = rows
+      .filter((s) => s.active !== false)          // absent students are held out
+      .sort((a, b) => (b.score || 0) - (a.score || 0));
     draw();
   });
   watchDoc(`classes/${state.classId}/live/now`, (doc) => {
@@ -100,7 +102,10 @@ function idleScreen() {
 function drawnScreen(live) {
   const wrap = el('div', { class: 'board-grid' });
   const names = el('div', { class: 'spotlight' });
-  names.appendChild(el('div', { class: 'drum', text: `Round ${live.roundNo || 1}` }));
+  const per = Math.max(1, live.questionsPerRound || 1);
+  names.appendChild(el('div', { class: 'drum', text: per > 1
+    ? `Round ${live.roundNo || 1} — ${per} questions`
+    : `Round ${live.roundNo || 1}` }));
   (live.drawn || []).forEach((d, i) => {
     if (i) names.appendChild(el('div', { class: 'vs', text: 'and' }));
     names.appendChild(el('div', { class: 'name', text: d.name }));
@@ -116,7 +121,10 @@ function questionScreen(live) {
 
   if (live.endsAt && live.phase === 'asking') main.appendChild(timerBar(live.endsAt, live.startedAt));
 
-  main.appendChild(el('div', { class: 'board-label', text: (live.drawn || []).map((d) => d.name).join('   ·   ') }));
+  const per = Math.max(1, live.questionsPerRound || 1);
+  main.appendChild(el('div', { class: 'board-label', text:
+    (live.drawn || []).map((d) => d.name).join('   ·   ') +
+    (per > 1 ? `      question ${live.questionNo || 1} of ${per}` : '') }));
   main.appendChild(el('div', { class: 'qtext', text: q.text }));
   if (q.image) main.appendChild(el('img', { src: q.image, alt: '', style: 'max-height:32vh;border-radius:10px;margin-bottom:3vh' }));
 
@@ -224,7 +232,9 @@ function spin(live) {
   root.textContent = '';
   const wrap = el('div', { class: 'board-grid' });
   const stage = el('div', { class: 'spotlight' });
-  stage.appendChild(el('div', { class: 'drum', text: `Round ${live.roundNo || 1}` }));
+  stage.appendChild(el('div', { class: 'drum', text: (live.questionsPerRound || 1) > 1
+    ? `Round ${live.roundNo || 1} — ${live.questionsPerRound} questions`
+    : `Round ${live.roundNo || 1}` }));
 
   const slots = (live.drawn || []).map((d, i) => {
     if (i) stage.appendChild(el('div', { class: 'vs', text: 'and' }));

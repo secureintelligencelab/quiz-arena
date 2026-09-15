@@ -7,7 +7,7 @@ import {
   DEFAULT_SETTINGS, QUESTION_TYPES, parseStudents, parseQuestions, drawStudents,
   computeAwards, toCsv, download, slug, rid
 } from './model.js';
-import { grade, score, DIFFICULTY_NAMES, brierMean, calibrationBuckets } from './scoring.js';
+import { grade, score, preview, DIFFICULTY_NAMES, brierMean, calibrationBuckets } from './scoring.js';
 import { el, $, $$, answerWidget, confidenceWidget, questionMeta, typeLabel, describeAnswer, sfx, toast, LETTERS } from './render.js';
 
 const state = {
@@ -23,6 +23,7 @@ const state = {
   results: [],
   prizes: [],
   seats: [],
+  responseError: null,
   section: 'run',
   filters: { topic: '', difficulty: '', type: '' },
   teacherEntry: {}          // studentId -> { answer, confidence } when typing for the class
@@ -209,10 +210,19 @@ function watchResponses() {
   if (respUnsub) { respUnsub(); respUnsub = null; }
   const roundId = state.live?.roundId;
   if (!roundId) { state.responses = []; return; }
-  respUnsub = watchList(`classes/${state.classId}/rounds/${roundId}/responses`, (rows) => {
-    state.responses = rows;
-    if (state.section === 'run') render();
-  });
+  state.responseError = null;
+  respUnsub = watchList(
+    `classes/${state.classId}/rounds/${roundId}/responses`,
+    (rows) => {
+      state.responses = rows;
+      state.responseError = null;
+      if (state.section === 'run') render();
+    },
+    (info) => {
+      state.responseError = info;
+      if (state.section === 'run') render();
+    }
+  );
 }
 
 function updatePoolNote() {
@@ -264,10 +274,18 @@ function renderRun() {
 
   /* left: who is up */
   const left = el('div', { class: 'stack' });
-  left.appendChild(el('h2', { text: live.phase === 'idle' ? 'Who is next' : `Round ${live.roundNo || 1}` }));
+  const per = Math.max(1, live.questionsPerRound || state.settings.questionsPerRound || 1);
+  left.appendChild(el('h2', { text: live.phase === 'idle'
+    ? 'Who is next'
+    : (per > 1
+        ? `Round ${live.roundNo || 1}, question ${Math.max(1, live.questionNo || 1)} of ${per}`
+        : `Round ${live.roundNo || 1}`) }));
 
   if (live.phase === 'idle') {
-    left.appendChild(el('p', { class: 'muted tiny', text: `${state.settings.drawCount} students, drawn ${state.settings.drawMode === 'fair' ? 'with a nudge towards whoever has had fewest turns' : 'at random'}.` }));
+    const qpr = Math.max(1, Number(state.settings.questionsPerRound) || 1);
+    left.appendChild(el('p', { class: 'muted tiny', text:
+      `${state.settings.drawCount} students, drawn ${state.settings.drawMode === 'fair' ? 'with a nudge towards whoever has had fewest turns' : 'at random'}` +
+      (qpr > 1 ? `, facing ${qpr} questions each.` : '.') }));
     left.appendChild(el('button', { class: 'btn-primary btn-big', onclick: doDraw, text: 'Draw students' }));
   } else {
     (live.drawn || []).forEach((p, i) => {
@@ -290,6 +308,8 @@ function renderRun() {
       left.appendChild(el('button', { class: 'btn-ghost tiny', onclick: doDraw, text: 'Draw again' }));
     }
   }
+
+  left.appendChild(attendancePanel());
 
   const resting = state.students.filter((s) => s.resting);
   if (resting.length) {
@@ -315,7 +335,9 @@ function renderRun() {
   /* right: scoreboard */
   const right = el('div', { class: 'panel' }, [el('h3', { text: 'Scoreboard' })]);
   const board = el('div', { class: 'lb' });
-  const ranked = [...state.students].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const ranked = [...state.students]
+    .filter((s) => s.active !== false)
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
   ranked.slice(0, 14).forEach((s, i) => {
     board.appendChild(el('div', { class: `lb-row ${i === 0 && s.score ? 'lead' : ''} ${s.resting ? 'rest' : ''}` }, [
       el('span', { class: 'rk', text: String(i + 1) }),
@@ -328,6 +350,49 @@ function renderRun() {
 
   stage.append(left, centre, right);
   root.appendChild(stage);
+}
+
+/**
+ * Marking who is absent belongs at the start of a lesson, next to the draw,
+ * not three screens away on the class list. Held-out students are skipped by
+ * the draw and keep the score they already had.
+ */
+function attendancePanel() {
+  const away = state.students.filter((s) => s.active === false);
+  const here = state.students.filter((s) => s.active !== false);
+
+  const box = el('details', { class: 'panel', style: 'padding:14px 16px' });
+  box.appendChild(el('summary', { style: 'cursor:pointer;font-weight:600' },
+    `Who is here — ${here.length} in, ${away.length} away`));
+  box.appendChild(el('p', { class: 'tiny muted', style: 'margin-top:8px',
+    text: 'Tap a name to hold them out of the draw. Their score is kept.' }));
+
+  const chips = el('div', { class: 'row wrap', style: 'gap:6px' });
+  state.students.forEach((s) => {
+    const out = s.active === false;
+    chips.appendChild(el('button', {
+      class: 'tiny',
+      style: out
+        ? 'opacity:.55;text-decoration:line-through'
+        : 'border-color:var(--jade);color:var(--jade)',
+      title: out ? 'Bring back into the draw' : 'Hold out of the draw',
+      onclick: () => set(`classes/${state.classId}/students/${s.id}`, { active: out }),
+      text: s.name
+    }));
+  });
+  box.appendChild(chips);
+
+  if (away.length) {
+    box.appendChild(el('button', {
+      class: 'tiny', style: 'margin-top:10px',
+      onclick: async () => {
+        for (const s of away) await set(`classes/${state.classId}/students/${s.id}`, { active: true });
+        toast('Everyone is back in.');
+      },
+      text: 'Everyone is here today'
+    }));
+  }
+  return box;
 }
 
 function nextQuestionPicker() {
@@ -411,7 +476,10 @@ function leastUsed(pool) {
 function liveQuestionCard(live) {
   const q = live.question;
   const card = el('div', { class: 'qcard' });
-  card.appendChild(questionMeta(q, [el('span', { class: 'tag', text: `Round ${live.roundNo || 1}` })]));
+  const perRound = Math.max(1, live.questionsPerRound || 1);
+  card.appendChild(questionMeta(q, [el('span', { class: 'tag', text: perRound > 1
+    ? `Round ${live.roundNo || 1} · Q${live.questionNo || 1}/${perRound}`
+    : `Round ${live.roundNo || 1}` })]));
   card.appendChild(el('div', { class: 'qtext', text: q.text }));
   if (q.image) card.appendChild(el('img', { src: q.image, alt: '', style: 'max-width:100%;border-radius:8px;margin-bottom:16px' }));
 
@@ -429,16 +497,41 @@ function liveQuestionCard(live) {
   } else if (state.settings.answerMode === 'teacher') {
     card.appendChild(teacherEntryPanel(live));
   } else {
-    card.appendChild(el('div', { class: 'notice notice-ok' },
-      `${state.responses.length} of ${(live.drawn || []).length} answers in. Students are answering on their own devices.`));
-    card.appendChild(el('div', { class: 'stack' },
-      (live.drawn || []).map((p) => {
-        const r = state.responses.find((x) => x.id === p.id);
-        return el('div', { class: 'row', style: 'justify-content:space-between;border-bottom:1px solid var(--line-soft);padding:6px 0' }, [
-          el('span', { text: p.name }),
-          el('span', { class: r ? 'tag tag-jade' : 'tag', text: r ? 'answered' : 'waiting' })
-        ]);
-      })));
+    if (state.responseError) {
+      card.appendChild(el('div', { class: 'notice notice-bad' }, [
+        el('div', { text: `Cannot read the answers coming in: ${state.responseError.code}. Do not reveal yet — everyone would be marked wrong.` }),
+        state.responseError.hint ? el('div', { class: 'tiny', style: 'margin-top:5px', text: state.responseError.hint }) : null
+      ]));
+    } else {
+      card.appendChild(el('div', { class: 'notice notice-ok' },
+        `${state.responses.length} of ${(live.drawn || []).length} answers in. Students are answering on their own devices.`));
+    }
+
+    /* What they actually put, as it arrives. You need this to judge a written
+       answer, to spot a misread question, and to see it at all if a phone
+       drops out before the reveal. */
+    const table = el('table');
+    table.appendChild(el('thead', {}, el('tr', {}, [
+      el('th', { text: 'Student' }), el('th', { text: 'Their answer' }),
+      el('th', { text: 'How sure' }), el('th', { class: 'num', text: 'At stake' })
+    ])));
+    const body = el('tbody');
+    (live.drawn || []).forEach((p) => {
+      const r = state.responses.find((x) => x.id === p.id);
+      const stake = r ? preview(q, r.confidence, state.settings) : null;
+      body.appendChild(el('tr', {}, [
+        el('td', { text: p.name }),
+        el('td', r
+          ? { text: describeAnswer(q, r.answer) }
+          : { class: 'muted', text: 'still thinking' }),
+        el('td', { text: r
+          ? (state.settings.rule === 'calibration' ? `${r.confidence}%` : ['', 'not sure', 'fairly sure', 'certain'][r.confidence] || '—')
+          : '—' }),
+        el('td', { class: 'num tiny', text: stake ? `+${stake.best} / ${stake.worst}` : '—' })
+      ]));
+    });
+    table.appendChild(body);
+    card.appendChild(table);
   }
 
   const controls = el('div', { class: 'row wrap', style: 'margin-top:20px' });
@@ -448,10 +541,19 @@ function liveQuestionCard(live) {
       el('button', { onclick: cancelRound, text: 'Cancel this round' })
     );
   } else if (live.phase === 'revealed') {
-    controls.append(
-      el('button', { class: 'btn-go btn-big', onclick: nextRound, text: 'Next round' }),
-      el('button', { onclick: undoRound, class: 'btn-danger', text: 'Undo the scoring' })
-    );
+    const left = questionsLeft(live);
+    if (left > 0) {
+      controls.append(
+        el('button', {
+          class: 'btn-go btn-big', onclick: nextQuestionSameStudents,
+          text: `Next question (${left} left for these students)`
+        }),
+        el('button', { onclick: nextRound, text: 'End the round and draw again' })
+      );
+    } else {
+      controls.append(el('button', { class: 'btn-go btn-big', onclick: nextRound, text: 'Next round' }));
+    }
+    controls.append(el('button', { onclick: undoRound, class: 'btn-danger', text: 'Undo the scoring' }));
   }
   card.appendChild(controls);
   return card;
@@ -549,6 +651,9 @@ async function doDraw() {
     results: null,
     revealKey: null,
     drawn: picked.map((s) => ({ id: s.id, name: s.name })),
+    questionNo: 0,
+    questionsPerRound: Math.max(1, Number(state.settings.questionsPerRound) || 1),
+    pendingRest: [],
     settings: state.settings,
     drawnAt: Date.now()
   }, { merge: false });
@@ -557,11 +662,13 @@ async function doDraw() {
 async function ask(q) {
   if (!q) return;
   let live = state.live;
-  if (!live || live.phase === 'idle' || live.phase === 'revealed' || !live.drawn?.length) {
+  if (!live || live.phase === 'idle' || !live.drawn?.length || roundIsOver(live)) {
     await doDraw();
     live = await get(`classes/${state.classId}/live/now`);
+    if (!live?.drawn?.length) return;
   }
   const roundId = rid('round');
+  const questionNo = (live.questionNo || 0) + 1;
   state.teacherEntry = {};
 
   await set(`classes/${state.classId}/rounds/${roundId}`, {
@@ -572,6 +679,7 @@ async function ask(q) {
   await set(`classes/${state.classId}/live/now`, {
     phase: 'asking',
     roundId,
+    questionNo,
     questionId: q.id,
     question: q,
     results: null,
@@ -589,6 +697,20 @@ async function reveal() {
   const q = live.question;
   const key = state.keys[q.id] || await get(`classes/${state.classId}/keys/${q.id}`);
   if (!key) { toast('The answer key for this question is missing.', 'bad'); return; }
+
+  if (state.responseError) {
+    toast('The answers cannot be read right now. Fix that before revealing, or everyone will be scored as wrong.', 'bad');
+    return;
+  }
+  if (state.settings.answerMode === 'devices') {
+    const silent = (live.drawn || []).filter((p) => !state.responses.some((r) => r.id === p.id));
+    if (silent.length && !confirm(
+      `${silent.map((p) => p.name).join(' and ')} ${silent.length > 1 ? 'have' : 'has'} not answered yet. ` +
+      'Revealing now scores them as wrong. Carry on?')) return;
+  }
+
+  const per = Math.max(1, live.questionsPerRound || 1);
+  const lastOfRound = (live.questionNo || 1) >= per;
 
   const results = [];
   for (const p of live.drawn || []) {
@@ -623,7 +745,9 @@ async function reveal() {
       wrong: (s.wrong || 0) + (r.correct ? 0 : 1),
       streak,
       bestStreak: Math.max(s.bestStreak || 0, streak),
-      resting: r.correct && state.settings.restOnCorrect ? true : (s.resting || false),
+      resting: r.correct && state.settings.restOnCorrect && lastOfRound
+        ? true
+        : (s.resting || false),
       lastRound: live.roundId
     });
     await set(`classes/${state.classId}/results/${live.roundId}--${r.studentId}`, {
@@ -644,16 +768,50 @@ async function reveal() {
     }
   } catch { /* nobody answered along */ }
 
+  // Anyone who got one right this round sits out afterwards, but not until
+  // the round has finished.
+  const earnedRest = state.settings.restOnCorrect
+    ? results.filter((r) => r.correct).map((r) => r.studentId)
+    : [];
+  const pendingRest = [...new Set([...(live.pendingRest || []), ...earnedRest])];
+
   await set(`classes/${state.classId}/questions/${q.id}`, { asked: (q.asked || 0) + 1 });
-  await set(`classes/${state.classId}/live/now`, { phase: 'revealed', results, revealKey: key, classStat });
+  await set(`classes/${state.classId}/live/now`, {
+    phase: 'revealed', results, revealKey: key, classStat, pendingRest
+  });
 
   state.results = await list(`classes/${state.classId}/results`);
   results.some((r) => r.correct) ? sfx.right() : sfx.wrong();
 }
 
-async function nextRound() {
+/** Every question the drawn students were going to face has been asked. */
+function roundIsOver(live) {
+  const per = Math.max(1, live.questionsPerRound || 1);
+  return live.phase === 'revealed' && (live.questionNo || 1) >= per;
+}
+
+function questionsLeft(live) {
+  const per = Math.max(1, live?.questionsPerRound || 1);
+  return Math.max(0, per - (live?.questionNo || 0));
+}
+
+/** Hands the same students their next question, keeping the round going. */
+async function nextQuestionSameStudents() {
   await set(`classes/${state.classId}/live/now`, {
-    phase: 'idle', drawn: [], results: null, question: null, questionId: null, roundId: null, revealKey: null
+    phase: 'drawn', question: null, questionId: null, roundId: null, results: null, revealKey: null
+  });
+  state.teacherEntry = {};
+}
+
+async function nextRound() {
+  // Sitting out is held back until the whole round is done, so nobody is
+  // pulled out of a round they are still in the middle of.
+  for (const id of state.live?.pendingRest || []) {
+    await set(`classes/${state.classId}/students/${id}`, { resting: true });
+  }
+  await set(`classes/${state.classId}/live/now`, {
+    phase: 'idle', drawn: [], results: null, question: null, questionId: null,
+    roundId: null, revealKey: null, questionNo: 0, pendingRest: []
   });
   state.teacherEntry = {};
 }
@@ -768,7 +926,7 @@ function renderStudents() {
   table.appendChild(el('thead', {}, el('tr', {}, [
     el('th', { text: 'Name' }), el('th', { text: 'Id' }), el('th', { text: 'Group' }),
     el('th', { class: 'num', text: 'Points' }), el('th', { class: 'num', text: 'Turns' }),
-    el('th', { text: 'In the draw' }), el('th', { text: 'Phone' }), el('th', {})
+    el('th', { text: 'Attendance' }), el('th', { text: 'Phone' }), el('th', {})
   ])));
   const body = el('tbody');
   state.students.forEach((s) => {
@@ -778,10 +936,17 @@ function renderStudents() {
       el('td', { text: s.group || '—' }),
       el('td', { class: 'num', text: String(s.score || 0) }),
       el('td', { class: 'num', text: String(s.turns || 0) }),
-      el('td', {}, el('label', { class: 'check', style: 'margin:0' }, [
-        el('input', { type: 'checkbox', checked: s.active !== false && !s.resting,
-          onchange: (e) => set(`classes/${state.classId}/students/${s.id}`, { active: e.target.checked, resting: false }) }),
-        el('span', { class: 'tiny', text: s.resting ? 'sitting out' : (s.active === false ? 'away' : 'yes') })
+      el('td', {}, el('div', { class: 'row', style: 'gap:8px' }, [
+        el('button', {
+          class: 'tiny',
+          onclick: () => set(`classes/${state.classId}/students/${s.id}`, { active: s.active === false }),
+          text: s.active === false ? 'Mark present' : 'Mark away'
+        }),
+        s.active === false
+          ? el('span', { class: 'tag', text: 'away' })
+          : s.resting
+            ? el('span', { class: 'tag tag-gold', text: 'sitting out' })
+            : el('span', { class: 'tag tag-jade', text: 'in' })
       ])),
       el('td', {}, seatCell(s)),
       el('td', {}, el('button', { class: 'tiny btn-danger', onclick: () => removeStudent(s), text: 'Remove' }))
@@ -1253,6 +1418,11 @@ function renderSettings() {
       el('input', { type: 'number', min: '1', max: '8', value: String(s.drawCount), onchange: (e) => { s.drawCount = Number(e.target.value); } })
     ]),
     el('div', {}, [
+      el('label', { text: 'Questions per round' }),
+      el('input', { type: 'number', min: '1', max: '10', value: String(s.questionsPerRound || 1),
+        onchange: (e) => { s.questionsPerRound = Math.max(1, Number(e.target.value) || 1); } })
+    ]),
+    el('div', {}, [
       el('label', { text: 'How they are picked' }),
       el('select', { onchange: (e) => { s.drawMode = e.target.value; } }, [
         el('option', { value: 'fair', text: 'Leans towards whoever has had fewest turns', selected: s.drawMode === 'fair' }),
@@ -1269,7 +1439,7 @@ function renderSettings() {
   ]));
   draw.appendChild(el('label', { class: 'check', style: 'margin-top:12px' }, [
     el('input', { type: 'checkbox', checked: s.restOnCorrect, onchange: (e) => { s.restOnCorrect = e.target.checked; } }),
-    el('span', { text: 'A student who answers correctly sits out the next draws until you bring them back' })
+    el('span', { text: 'A student who answers correctly sits out the next draws until you bring them back. With more than one question per round, this waits until the round is over.' })
   ]));
   draw.appendChild(el('label', { class: 'check' }, [
     el('input', { type: 'checkbox', checked: s.sound !== false, onchange: (e) => { s.sound = e.target.checked; } }),

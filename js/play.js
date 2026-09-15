@@ -187,7 +187,9 @@ function renderLive() {
       sfx.draw();
       app.appendChild(el('div', { class: 'panel waiting-card', style: 'border-color:var(--gold);background:var(--gold-soft)' }, [
         el('div', { class: 'pulse', style: 'color:var(--gold)', text: 'You are up' }),
-        el('p', { class: 'muted', text: 'The question is coming.' })
+        el('p', { class: 'muted', text: (live.questionsPerRound || 1) > 1
+          ? `${live.questionsPerRound} questions coming your way.`
+          : 'The question is coming.' })
       ]));
     } else {
       app.appendChild(waiting('This round is for ' + (live.drawn || []).map((d) => d.name).join(' and '),
@@ -200,6 +202,11 @@ function renderLive() {
   if (!q) return appendLeave();
 
   const card = el('div', { class: 'qcard' });
+  const per = Math.max(1, live.questionsPerRound || 1);
+  if (per > 1 && amDrawn()) {
+    card.appendChild(el('p', { class: 'tiny muted', style: 'margin-bottom:8px',
+      text: `Question ${live.questionNo || 1} of ${per} for you this round.` }));
+  }
   if (!state.seat.ok) {
     card.appendChild(el('div', { class: 'notice notice-bad', text: state.seat.reason === 'taken'
       ? 'Another phone is signed in under your name, so your answers will not save. Ask your teacher to release it.'
