@@ -87,17 +87,21 @@ service cloud.firestore {
         allow read: if signedIn();
         allow write: if isTeacher();
 
-        // Scored answers: your own document, your own id, and no editing
-        // someone else's. Teachers read them all.
+        // Scored answers. Only a teacher reads these, and reading is kept as
+        // its own statement: a query over the whole collection cannot bind
+        // {studentId}, so a rule that mixed `isTeacher()` with a per-student
+        // seat check made the teacher's live read unreliable. Students do not
+        // need to read answers at all — their result arrives in the live
+        // round document.
         match /responses/{studentId} {
-          allow read: if isTeacher() || holdsSeat(classId, studentId);
+          allow read: if isTeacher();
           allow create, update: if holdsSeat(classId, studentId) || isTeacher();
           allow delete: if isTeacher();
         }
 
         // Practice answers from students who were not drawn. Same rule.
         match /shadow/{studentId} {
-          allow read: if isTeacher() || holdsSeat(classId, studentId);
+          allow read: if isTeacher();
           allow create, update: if holdsSeat(classId, studentId) || isTeacher();
           allow delete: if isTeacher();
         }

@@ -99,6 +99,7 @@ first thing that is wrong, with the fix. The usual culprits:
 | Console asks you to sign in | Expected. Use the teacher account from step 6 |
 | A student sees "another phone is signed in as you" | They changed phone or cleared their browser. Class list page, **Release** next to their name |
 | Answers not saving for anyone | Class list page, **Release all phones**, then have them pick their names again |
+| Teacher sees "still thinking" forever | Republish `firestore.rules`. An older version made the teacher's live read of the answers unreliable |
 | Signs in, still refused | That account's UID is not in `admins`. The sign-in screen shows the UID to copy |
 
 That last one is the one that catches people, because it looks exactly like a
@@ -245,6 +246,7 @@ right answers and one wrong one out of three scores two thirds, not zero.
 ## Running a round
 
 1. **Draw students.** The big screen flickers through names before settling.
+   They stay up for as many questions as the round is set to.
 2. **Ask a question.** Pick one, or press *Ask the next question* to take the
    least-used question matching your topic and difficulty filters.
 3. Students see it on their phones, choose a confidence, and lock in an answer.
@@ -252,11 +254,18 @@ right answers and one wrong one out of three scores two thirds, not zero.
    saved separately and never counted, which gives the other twenty-eight people
    in the room something to do.
 4. **Lock and show the answer.** Everyone is graded and scored at once.
-5. **Next round.**
+5. **Next question**, if the round has more left, or **Next round** to draw
+   again. When a round runs over several questions, sitting out is held back
+   until the round finishes, so nobody is pulled out halfway through.
 
 Settings worth knowing about:
 
 - **Students per round.** Two by default. Up to eight.
+- **Questions per round.** One by default. Raise it and the same drawn students
+  face that many questions before a new draw, which suits a head-to-head over a
+  few questions rather than a single sudden-death one. After each reveal the
+  button says how many are left, and **End the round and draw again** cuts it
+  short whenever you want.
 - **How they are picked.** *Leans towards whoever has had fewest turns* is still
   a genuine draw — nobody can predict it — but it stops the same four hands
   dominating. Flat random is there if you want it.
@@ -265,6 +274,17 @@ Settings worth knowing about:
 - **Sitting out.** On by default: a student who answers correctly is skipped by
   the draw until you bring them back, from the panel on the left. Turn it off
   and correct answers stay in the pool.
+
+**Who is here.** The panel of that name on the run screen lists the whole class.
+Tap anyone who is absent and the draw skips them; tap again when they are back.
+Their score is untouched, and they drop off the scoreboard while they are out,
+so a missing student is not sitting in third place all lesson. The same thing
+can be done from the Attendance column on the class list.
+
+**While they answer**, the console shows what each drawn student has put in,
+how sure they said they were, and the points at stake either way, before you
+reveal anything. If one of them has not answered, revealing asks you to confirm
+first, since a missing answer is scored as wrong.
 
 *Undo the scoring* reverses a round if you misheard an answer.
 
