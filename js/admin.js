@@ -24,6 +24,7 @@ const state = {
   prizes: [],
   seats: [],
   responseError: null,
+  chosen: [],
   section: 'run',
   filters: { topic: '', difficulty: '', type: '' },
   teacherEntry: {}          // studentId -> { answer, confidence } when typing for the class
@@ -186,6 +187,7 @@ async function selectClass(id) {
   unsubs.push(watchDoc(`classes/${id}/live/now`, (doc) => {
     state.live = doc;
     watchResponses();
+    armAutoReveal(doc);
     if (state.section === 'run') render();
   }));
   unsubs.push(watchList(`classes/${id}/seats`, (rows) => {
@@ -233,6 +235,30 @@ function updatePoolNote() {
     : '';
 }
 
+/**
+ * When the clock runs out the round marks itself, so the console shows who was
+ * right without anyone having to press anything. Only the teacher's own
+ * session does this, and only once per round.
+ */
+let autoRevealTimer = null;
+let autoRevealedRound = null;
+
+function armAutoReveal(live) {
+  clearTimeout(autoRevealTimer);
+  autoRevealTimer = null;
+  if (!db.isAdmin) return;
+  if (!live || live.phase !== 'asking' || !live.endsAt) return;
+  if (autoRevealedRound === live.roundId) return;
+
+  const wait = live.endsAt - Date.now();
+  const fire = async () => {
+    if (state.live?.roundId !== live.roundId || state.live?.phase !== 'asking') return;
+    autoRevealedRound = live.roundId;
+    await reveal({ auto: true });
+  };
+  autoRevealTimer = setTimeout(fire, Math.max(0, wait) + 400);
+}
+
 /* ---------- section switching ------------------------------------------- */
 
 function show(name) {
@@ -270,37 +296,38 @@ function renderRun() {
   }
 
   const live = state.live || { phase: 'idle' };
+  const set = live.questions || [];
   const stage = el('div', { class: 'stage' });
 
-  /* left: who is up */
+  /* ---- left: who is up ---- */
   const left = el('div', { class: 'stack' });
-  const per = Math.max(1, live.questionsPerRound || state.settings.questionsPerRound || 1);
   left.appendChild(el('h2', { text: live.phase === 'idle'
     ? 'Who is next'
-    : (per > 1
-        ? `Round ${live.roundNo || 1}, question ${Math.max(1, live.questionNo || 1)} of ${per}`
-        : `Round ${live.roundNo || 1}`) }));
+    : (set.length > 1 ? `Round ${live.roundNo || 1}, ${set.length} questions` : `Round ${live.roundNo || 1}`) }));
 
   if (live.phase === 'idle') {
-    const qpr = Math.max(1, Number(state.settings.questionsPerRound) || 1);
+    const per = Math.max(1, Number(state.settings.questionsPerRound) || 1);
     left.appendChild(el('p', { class: 'muted tiny', text:
       `${state.settings.drawCount} students, drawn ${state.settings.drawMode === 'fair' ? 'with a nudge towards whoever has had fewest turns' : 'at random'}` +
-      (qpr > 1 ? `, facing ${qpr} questions each.` : '.') }));
+      (per > 1 ? `, facing ${per} questions each.` : '.') }));
     left.appendChild(el('button', { class: 'btn-primary btn-big', onclick: doDraw, text: 'Draw students' }));
   } else {
     (live.drawn || []).forEach((p, i) => {
       const resp = state.responses.find((r) => r.id === p.id);
+      const done = resp ? Object.keys(resp.answers || {}).length : 0;
       const result = (live.results || []).find((r) => r.studentId === p.id);
       const cls = ['podium-slot'];
-      if (result) cls.push(result.fraction === 1 ? 'is-correct' : 'is-wrong');
-      else if (!resp && live.phase === 'asking') cls.push('waiting');
+      if (result) cls.push(result.correctCount > 0 ? 'is-correct' : 'is-wrong');
+      else if (done < set.length && live.phase === 'asking') cls.push('waiting');
       left.appendChild(el('div', { class: cls.join(' ') }, [
         el('span', { class: 'seat', text: String(i + 1) }),
         el('span', { class: 'grow' }, [
           el('div', { class: 'who', text: p.name }),
           el('div', { class: 'tiny muted', text: result
-            ? `${result.fraction === 1 ? 'Correct' : result.fraction > 0 ? 'Partly right' : 'Wrong'} · ${result.points > 0 ? '+' : ''}${result.points}`
-            : resp ? 'Answer locked in' : live.phase === 'asking' ? 'Thinking…' : 'Ready' })
+            ? `${result.correctCount} of ${set.length} right · ${result.total > 0 ? '+' : ''}${result.total}`
+            : live.phase === 'asking'
+              ? (set.length > 1 ? `${done} of ${set.length} answered` : (done ? 'Answer locked in' : 'Thinking…'))
+              : 'Ready' })
         ])
       ]));
     });
@@ -324,15 +351,11 @@ function renderRun() {
     ]));
   }
 
-  /* centre: the question */
+  /* ---- centre ---- */
   const centre = el('div');
-  if (live.question && live.phase !== 'idle') {
-    centre.appendChild(liveQuestionCard(live));
-  } else {
-    centre.appendChild(nextQuestionPicker());
-  }
+  centre.appendChild(set.length && live.phase !== 'idle' ? liveRoundCard(live) : questionSetPicker());
 
-  /* right: scoreboard */
+  /* ---- right: scoreboard ---- */
   const right = el('div', { class: 'panel' }, [el('h3', { text: 'Scoreboard' })]);
   const board = el('div', { class: 'lb' });
   const ranked = [...state.students]
@@ -395,63 +418,100 @@ function attendancePanel() {
   return box;
 }
 
-function nextQuestionPicker() {
+/* ---------- choosing the questions -------------------------------------- */
+
+function questionSetPicker() {
+  const per = Math.max(1, Number(state.settings.questionsPerRound) || 1);
   const box = el('div', { class: 'panel' });
   box.appendChild(el('div', { class: 'panel-head' }, [
-    el('div', {}, [el('h3', { text: 'The question' }), el('p', { text: 'Pick one, or let the app take the least-used question that matches.' })])
+    el('div', {}, [
+      el('h3', { text: per > 1 ? `The ${per} questions for this round` : 'The question' }),
+      el('p', { text: per > 1
+        ? 'All of them go to the drawn students at once, and they answer at their own pace.'
+        : 'Pick one, or let the app take the least-used question that matches.' })
+    ])
   ]));
 
   const topics = [...new Set(state.questions.map((q) => q.topic).filter(Boolean))].sort();
-  const bar = el('div', { class: 'field-row' }, [
+  box.appendChild(el('div', { class: 'field-row' }, [
     el('div', {}, [
       el('label', { text: 'Topic' }),
-      el('select', { onchange: (e) => { state.filters.topic = e.target.value; render(); } }, [
+      el('select', { onchange: (e) => { state.filters.topic = e.target.value; state.chosen = []; render(); } }, [
         el('option', { value: '', text: 'Any topic' }),
         ...topics.map((t) => el('option', { value: t, text: t, selected: state.filters.topic === t }))
       ])
     ]),
     el('div', {}, [
       el('label', { text: 'Difficulty' }),
-      el('select', { onchange: (e) => { state.filters.difficulty = e.target.value; render(); } }, [
+      el('select', { onchange: (e) => { state.filters.difficulty = e.target.value; state.chosen = []; render(); } }, [
         el('option', { value: '', text: 'Any difficulty' }),
         ...[1, 2, 3, 4, 5].map((d) => el('option', { value: d, text: DIFFICULTY_NAMES[d], selected: String(state.filters.difficulty) === String(d) }))
       ])
     ]),
     el('div', {}, [
       el('label', { text: 'Type' }),
-      el('select', { onchange: (e) => { state.filters.type = e.target.value; render(); } }, [
+      el('select', { onchange: (e) => { state.filters.type = e.target.value; state.chosen = []; render(); } }, [
         el('option', { value: '', text: 'Any type' }),
         ...Object.entries(QUESTION_TYPES).map(([k, v]) => el('option', { value: k, text: v, selected: state.filters.type === k }))
       ])
     ])
-  ]);
-  box.appendChild(bar);
+  ]));
 
   const pool = filteredQuestions();
   if (!pool.length) {
     box.appendChild(el('p', { class: 'muted', text: 'Nothing matches those filters.' }));
     return box;
   }
+  if (pool.length < per) {
+    box.appendChild(el('div', { class: 'notice notice-warn',
+      text: `Only ${pool.length} question${pool.length === 1 ? '' : 's'} match, and the round is set to ${per}. Widen the filters or lower the setting.` }));
+  }
 
-  box.appendChild(el('button', {
-    class: 'btn-go btn-big', style: 'margin:6px 0 16px',
-    onclick: () => ask(leastUsed(pool)),
-    text: 'Ask the next question'
-  }));
+  const chosen = state.chosen.map((id) => state.questions.find((q) => q.id === id)).filter(Boolean);
+
+  const send = el('div', { class: 'row wrap', style: 'margin:6px 0 16px' }, [
+    el('button', {
+      class: 'btn-go btn-big',
+      onclick: () => askSet(chosen.length ? chosen : pickLeastUsed(pool, per)),
+      text: chosen.length
+        ? `Ask ${chosen.length === 1 ? 'this question' : `these ${chosen.length} questions`}`
+        : (per > 1 ? `Ask the next ${per} questions` : 'Ask the next question')
+    }),
+    chosen.length ? el('button', { onclick: () => { state.chosen = []; render(); }, text: 'Clear the picks' }) : null
+  ]);
+  box.appendChild(send);
+
+  if (chosen.length) {
+    box.appendChild(el('p', { class: 'tiny muted', text: chosen.map((q, i) => `${i + 1}. ${q.text.slice(0, 48)}`).join('   ') }));
+  }
 
   const table = el('table');
   table.appendChild(el('thead', {}, el('tr', {}, [
-    el('th', { text: 'Question' }), el('th', { text: 'Type' }),
+    el('th', { text: per > 1 ? 'Pick' : '' }), el('th', { text: 'Question' }), el('th', { text: 'Type' }),
     el('th', { text: 'Level' }), el('th', { class: 'num', text: 'Asked' }), el('th', {})
   ])));
   const body = el('tbody');
   pool.slice(0, 40).forEach((q) => {
+    const at = state.chosen.indexOf(q.id);
     body.appendChild(el('tr', {}, [
-      el('td', { text: q.text.length > 78 ? q.text.slice(0, 78) + '…' : q.text }),
+      el('td', {}, per > 1
+        ? el('button', {
+            class: 'tiny',
+            style: at >= 0 ? 'border-color:var(--jade);color:var(--jade)' : '',
+            onclick: () => {
+              if (at >= 0) state.chosen.splice(at, 1);
+              else if (state.chosen.length < per) state.chosen.push(q.id);
+              else toast(`This round takes ${per} questions. Remove one first.`, 'warn');
+              render();
+            },
+            text: at >= 0 ? `#${at + 1}` : 'add'
+          })
+        : null),
+      el('td', { text: q.text.length > 72 ? q.text.slice(0, 72) + '…' : q.text }),
       el('td', {}, el('span', { class: 'tag', text: typeLabel(q.type) })),
       el('td', { text: DIFFICULTY_NAMES[q.difficulty] }),
       el('td', { class: 'num', text: String(q.asked || 0) }),
-      el('td', {}, el('button', { class: 'tiny', onclick: () => ask(q), text: 'Ask this' }))
+      el('td', {}, per === 1 ? el('button', { class: 'tiny', onclick: () => askSet([q]), text: 'Ask this' }) : null)
     ]));
   });
   table.appendChild(body);
@@ -467,30 +527,23 @@ function filteredQuestions() {
     (!f.type || q.type === f.type));
 }
 
-function leastUsed(pool) {
-  const min = Math.min(...pool.map((q) => q.asked || 0));
-  const tier = pool.filter((q) => (q.asked || 0) === min);
-  return tier[Math.floor(Math.random() * tier.length)];
+/** Takes the n least-used questions, breaking ties at random. */
+function pickLeastUsed(pool, n) {
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
+  shuffled.sort((a, b) => (a.asked || 0) - (b.asked || 0));
+  return shuffled.slice(0, Math.min(n, shuffled.length));
 }
 
-function liveQuestionCard(live) {
-  const q = live.question;
-  const card = el('div', { class: 'qcard' });
-  const perRound = Math.max(1, live.questionsPerRound || 1);
-  card.appendChild(questionMeta(q, [el('span', { class: 'tag', text: perRound > 1
-    ? `Round ${live.roundNo || 1} · Q${live.questionNo || 1}/${perRound}`
-    : `Round ${live.roundNo || 1}` })]));
-  card.appendChild(el('div', { class: 'qtext', text: q.text }));
-  if (q.image) card.appendChild(el('img', { src: q.image, alt: '', style: 'max-width:100%;border-radius:8px;margin-bottom:16px' }));
+/* ---------- the live round ----------------------------------------------- */
 
-  const key = state.keys[q.id];
-  if (live.phase !== 'revealed' && key && db.isAdmin) {
-    const peek = el('details', { style: 'margin-bottom:16px' }, [
-      el('summary', { class: 'tiny muted', style: 'cursor:pointer', text: 'Show me the answer' }),
-      el('p', { class: 'tiny', style: 'margin-top:8px', text: keyText(q, key) })
-    ]);
-    card.appendChild(peek);
-  }
+function liveRoundCard(live) {
+  const set = live.questions || [];
+  const card = el('div', { class: 'qcard' });
+
+  card.appendChild(el('div', { class: 'spread', style: 'margin-bottom:14px' }, [
+    el('h3', { text: set.length > 1 ? `${set.length} questions in play` : 'In play' }),
+    live.phase === 'asking' && live.endsAt ? countdownChip(live.endsAt) : null
+  ]));
 
   if (live.phase === 'revealed') {
     card.appendChild(revealPanel(live));
@@ -502,61 +555,82 @@ function liveQuestionCard(live) {
         el('div', { text: `Cannot read the answers coming in: ${state.responseError.code}. Do not reveal yet — everyone would be marked wrong.` }),
         state.responseError.hint ? el('div', { class: 'tiny', style: 'margin-top:5px', text: state.responseError.hint }) : null
       ]));
-    } else {
-      card.appendChild(el('div', { class: 'notice notice-ok' },
-        `${state.responses.length} of ${(live.drawn || []).length} answers in. Students are answering on their own devices.`));
     }
-
-    /* What they actually put, as it arrives. You need this to judge a written
-       answer, to spot a misread question, and to see it at all if a phone
-       drops out before the reveal. */
-    const table = el('table');
-    table.appendChild(el('thead', {}, el('tr', {}, [
-      el('th', { text: 'Student' }), el('th', { text: 'Their answer' }),
-      el('th', { text: 'How sure' }), el('th', { class: 'num', text: 'At stake' })
-    ])));
-    const body = el('tbody');
-    (live.drawn || []).forEach((p) => {
-      const r = state.responses.find((x) => x.id === p.id);
-      const stake = r ? preview(q, r.confidence, state.settings) : null;
-      body.appendChild(el('tr', {}, [
-        el('td', { text: p.name }),
-        el('td', r
-          ? { text: describeAnswer(q, r.answer) }
-          : { class: 'muted', text: 'still thinking' }),
-        el('td', { text: r
-          ? (state.settings.rule === 'calibration' ? `${r.confidence}%` : ['', 'not sure', 'fairly sure', 'certain'][r.confidence] || '—')
-          : '—' }),
-        el('td', { class: 'num tiny', text: stake ? `+${stake.best} / ${stake.worst}` : '—' })
-      ]));
-    });
-    table.appendChild(body);
-    card.appendChild(table);
+    card.appendChild(progressTable(live));
+    set.forEach((q, i) => card.appendChild(questionPreview(q, i, set.length, live)));
   }
 
   const controls = el('div', { class: 'row wrap', style: 'margin-top:20px' });
-  if (live.phase === 'asking') {
+  if (live.phase === 'asking' || live.phase === 'drawn') {
     controls.append(
-      el('button', { class: 'btn-primary btn-big', onclick: reveal, text: 'Lock and show the answer' }),
+      el('button', { class: 'btn-primary btn-big', onclick: () => reveal(), text: 'Lock and show the answers' }),
       el('button', { onclick: cancelRound, text: 'Cancel this round' })
     );
   } else if (live.phase === 'revealed') {
-    const left = questionsLeft(live);
-    if (left > 0) {
-      controls.append(
-        el('button', {
-          class: 'btn-go btn-big', onclick: nextQuestionSameStudents,
-          text: `Next question (${left} left for these students)`
-        }),
-        el('button', { onclick: nextRound, text: 'End the round and draw again' })
-      );
-    } else {
-      controls.append(el('button', { class: 'btn-go btn-big', onclick: nextRound, text: 'Next round' }));
-    }
-    controls.append(el('button', { onclick: undoRound, class: 'btn-danger', text: 'Undo the scoring' }));
+    controls.append(
+      el('button', { class: 'btn-go btn-big', onclick: nextRound, text: 'Next round' }),
+      el('button', { onclick: undoRound, class: 'btn-danger', text: 'Undo the scoring' })
+    );
   }
   card.appendChild(controls);
   return card;
+}
+
+/** Who has answered what, updating as it arrives. */
+function progressTable(live) {
+  const set = live.questions || [];
+  const box = el('div', { class: 'stack' });
+  const table = el('table');
+  table.appendChild(el('thead', {}, el('tr', {}, [
+    el('th', { text: 'Student' }),
+    ...set.map((q, i) => el('th', { text: set.length > 1 ? `Q${i + 1}` : 'Their answer' })),
+    el('th', { class: 'num', text: 'Done' })
+  ])));
+  const body = el('tbody');
+  (live.drawn || []).forEach((p) => {
+    const r = state.responses.find((x) => x.id === p.id);
+    const done = r ? Object.keys(r.answers || {}).length : 0;
+    body.appendChild(el('tr', {}, [
+      el('td', { text: p.name }),
+      ...set.map((q) => {
+        const given = r?.answers?.[q.id];
+        if (given === undefined) return el('td', { class: 'muted tiny', text: '—' });
+        return el('td', { class: 'tiny', title: describeAnswer(q, given) }, [
+          el('div', { text: describeAnswer(q, given).slice(0, 28) }),
+          el('div', { class: 'muted', text: state.settings.rule === 'calibration'
+            ? `${r.confidence?.[q.id] ?? '?'}%`
+            : ['', 'not sure', 'fairly sure', 'certain'][r.confidence?.[q.id]] || '' })
+        ]);
+      }),
+      el('td', { class: 'num', text: `${done}/${set.length}` })
+    ]));
+  });
+  table.appendChild(body);
+  box.appendChild(table);
+  return box;
+}
+
+/** The teacher's own view of a question, with the answer tucked away. */
+function questionPreview(q, i, total, live) {
+  const key = state.keys[q.id];
+  const wrap = el('details', { style: 'border-top:1px solid var(--line-soft);padding:10px 0' });
+  wrap.appendChild(el('summary', { style: 'cursor:pointer' },
+    total > 1 ? `Q${i + 1}. ${q.text}` : q.text));
+  wrap.appendChild(questionMeta(q));
+  if (key && db.isAdmin) wrap.appendChild(el('p', { class: 'tiny', text: `Answer: ${keyText(q, key)}` }));
+  if (q.explanation) wrap.appendChild(el('p', { class: 'tiny muted', text: q.explanation }));
+  return wrap;
+}
+
+function countdownChip(endsAt) {
+  const chip = el('span', { class: 'tag tag-gold' });
+  const tick = () => {
+    const left = Math.max(0, Math.round((endsAt - Date.now()) / 1000));
+    chip.textContent = left ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} left` : 'time is up';
+    if (left && chip.isConnected) setTimeout(tick, 500);
+  };
+  tick();
+  return chip;
 }
 
 function keyText(q, key) {
@@ -571,66 +645,102 @@ function keyText(q, key) {
 }
 
 function teacherEntryPanel(live) {
+  const set = live.questions || [];
   const box = el('div', { class: 'stack' });
-  box.appendChild(el('p', { class: 'tiny muted', text: 'Ask each student out loud how sure they are, then record what they say.' }));
+  box.appendChild(el('p', { class: 'tiny muted', text: 'Ask each student how sure they are, then record what they say.' }));
+
   (live.drawn || []).forEach((p) => {
-    const entry = (state.teacherEntry[p.id] ||= { answer: null, confidence: state.settings.rule === 'calibration' ? 60 : 2 });
+    const entry = (state.teacherEntry[p.id] ||= { answers: {}, confidence: {} });
     const panel = el('div', { class: 'panel', style: 'padding:16px 18px' }, [el('h3', { text: p.name })]);
-    panel.appendChild(el('label', { text: 'How sure are they?' }));
-    panel.appendChild(confidenceWidget(live.question, state.settings, {
-      value: entry.confidence,
-      onChange: (v) => { entry.confidence = v; }
-    }));
-    panel.appendChild(el('div', { style: 'height:12px' }));
-    panel.appendChild(el('label', { text: 'Their answer' }));
-    panel.appendChild(answerWidget(live.question, {
-      value: entry.answer,
-      onChange: (v) => { entry.answer = v; }
-    }));
+    set.forEach((q, i) => {
+      panel.appendChild(el('div', { style: 'border-top:1px solid var(--line-soft);margin-top:12px;padding-top:12px' }, [
+        el('div', { style: 'font-weight:500;margin-bottom:8px', text: set.length > 1 ? `Q${i + 1}. ${q.text}` : q.text })
+      ]));
+      panel.appendChild(el('label', { text: 'How sure?' }));
+      panel.appendChild(confidenceWidget(q, state.settings, {
+        value: entry.confidence[q.id] ?? (state.settings.rule === 'calibration' ? 60 : 2),
+        onChange: (v) => { entry.confidence[q.id] = v; }
+      }));
+      entry.confidence[q.id] ??= state.settings.rule === 'calibration' ? 60 : 2;
+      panel.appendChild(el('div', { style: 'height:10px' }));
+      panel.appendChild(answerWidget(q, {
+        value: entry.answers[q.id],
+        onChange: (v) => { entry.answers[q.id] = v; }
+      }));
+    });
     box.appendChild(panel);
   });
   return box;
 }
 
 function revealPanel(live) {
-  const q = live.question;
-  const key = state.keys[q.id];
+  const set = live.questions || [];
   const box = el('div', { class: 'stack' });
 
-  if (key) {
-    box.appendChild(el('div', { class: 'notice notice-ok', text: `Answer: ${keyText(q, key)}` }));
+  if (live.autoRevealed) {
+    box.appendChild(el('div', { class: 'notice notice-warn', text: 'Time ran out, so the round was marked automatically.' }));
   }
-  if (q.explanation) box.appendChild(el('p', { text: q.explanation }));
 
-  const table = el('table');
-  table.appendChild(el('thead', {}, el('tr', {}, [
-    el('th', { text: 'Student' }), el('th', { text: 'Said' }), el('th', { text: 'Sure?' }),
-    el('th', { text: 'Result' }), el('th', { class: 'num', text: 'Points' })
+  const totals = el('table');
+  totals.appendChild(el('thead', {}, el('tr', {}, [
+    el('th', { text: 'Student' }), el('th', { class: 'num', text: 'Right' }), el('th', { class: 'num', text: 'Points' })
   ])));
-  const body = el('tbody');
-  (live.results || []).forEach((r) => {
-    body.appendChild(el('tr', {}, [
+  const tbody = el('tbody');
+  [...(live.results || [])].sort((a, b) => b.total - a.total).forEach((r) => {
+    tbody.appendChild(el('tr', {}, [
       el('td', { text: r.name }),
-      el('td', { text: describeAnswer(q, r.answer) }),
-      el('td', { text: state.settings.rule === 'calibration' ? `${r.confidencePct}%` : ['', 'not sure', 'fairly sure', 'certain'][r.tier] }),
-      el('td', {}, el('span', {
-        class: `tag ${r.fraction === 1 ? 'tag-jade' : r.fraction > 0 ? 'tag-gold' : 'tag-rose'}`,
-        text: r.fraction === 1 ? 'Correct' : r.fraction > 0 ? `${Math.round(r.fraction * 100)}%` : 'Wrong'
+      el('td', { class: 'num' }, el('span', {
+        class: `tag ${r.correctCount === set.length ? 'tag-jade' : r.correctCount ? 'tag-gold' : 'tag-rose'}`,
+        text: `${r.correctCount} of ${set.length}`
       })),
-      el('td', { class: 'num', style: `color:${r.points >= 0 ? 'var(--jade)' : 'var(--rose)'}`, text: `${r.points > 0 ? '+' : ''}${r.points}` })
+      el('td', { class: 'num', style: `color:${r.total >= 0 ? 'var(--jade)' : 'var(--rose)'}`, text: `${r.total > 0 ? '+' : ''}${r.total}` })
     ]));
   });
-  table.appendChild(body);
-  box.appendChild(table);
+  totals.appendChild(tbody);
+  box.appendChild(totals);
+
+  set.forEach((q, i) => {
+    const key = (live.revealKeys || {})[q.id];
+    const block = el('div', { style: 'border-top:1px solid var(--line);margin-top:18px;padding-top:14px' });
+    block.appendChild(el('div', { style: 'font-weight:500;margin-bottom:6px', text: set.length > 1 ? `Q${i + 1}. ${q.text}` : q.text }));
+    if (key) block.appendChild(el('div', { class: 'notice notice-ok', text: `Answer: ${keyText(q, key)}` }));
+    if (q.explanation) block.appendChild(el('p', { class: 'tiny muted', text: q.explanation }));
+
+    const t = el('table');
+    t.appendChild(el('thead', {}, el('tr', {}, [
+      el('th', { text: 'Student' }), el('th', { text: 'Said' }), el('th', { text: 'How sure' }),
+      el('th', { text: 'Result' }), el('th', { class: 'num', text: 'Points' })
+    ])));
+    const tb = el('tbody');
+    (live.results || []).forEach((r) => {
+      const cell = (r.perQuestion || []).find((x) => x.questionId === q.id);
+      if (!cell) return;
+      tb.appendChild(el('tr', {}, [
+        el('td', { text: r.name }),
+        el('td', { text: describeAnswer(q, cell.answer) }),
+        el('td', { text: state.settings.rule === 'calibration'
+          ? `${cell.confidence}%`
+          : ['', 'not sure', 'fairly sure', 'certain'][cell.confidence] || '—' }),
+        el('td', {}, el('span', {
+          class: `tag ${cell.fraction === 1 ? 'tag-jade' : cell.fraction > 0 ? 'tag-gold' : 'tag-rose'}`,
+          text: cell.fraction === 1 ? 'Correct' : cell.fraction > 0 ? `${Math.round(cell.fraction * 100)}%` : 'Wrong'
+        })),
+        el('td', { class: 'num', style: `color:${cell.points >= 0 ? 'var(--jade)' : 'var(--rose)'}`, text: `${cell.points > 0 ? '+' : ''}${cell.points}` })
+      ]));
+    });
+    t.appendChild(tb);
+    block.appendChild(t);
+    box.appendChild(block);
+  });
 
   if (live.classStat) {
     box.appendChild(el('p', { class: 'tiny muted', text:
-      `${live.classStat.right} of ${live.classStat.n} students answering along on their own phones got this right. Those answers do not count towards anyone's score.` }));
+      `${live.classStat.right} of ${live.classStat.answers} practice answers from the rest of the class were right. They do not count towards anyone's score.` }));
   }
   return box;
 }
 
-/* ---------- round actions ----------------------------------------------- */
+/* ---------- round actions ------------------------------------------------ */
 
 async function doDraw() {
   const { picked, poolSize } = drawStudents(state.students, {
@@ -641,177 +751,170 @@ async function doDraw() {
   if (poolSize < state.settings.drawCount) toast(`Only ${poolSize} students were available.`, 'warn');
 
   sfx.draw();
-  const roundNo = (state.live?.roundNo || 0) + 1;
+  state.chosen = [];
   await set(`classes/${state.classId}/live/now`, {
     phase: 'drawn',
-    roundNo,
+    roundNo: (state.live?.roundNo || 0) + 1,
     roundId: null,
-    questionId: null,
-    question: null,
+    questions: [],
     results: null,
-    revealKey: null,
+    revealKeys: null,
+    classStat: null,
+    autoRevealed: false,
     drawn: picked.map((s) => ({ id: s.id, name: s.name })),
-    questionNo: 0,
-    questionsPerRound: Math.max(1, Number(state.settings.questionsPerRound) || 1),
-    pendingRest: [],
     settings: state.settings,
     drawnAt: Date.now()
   }, { merge: false });
 }
 
-async function ask(q) {
-  if (!q) return;
+/** Sends the whole set of questions to the drawn students at once. */
+async function askSet(questions) {
+  if (!questions || !questions.length) return;
   let live = state.live;
-  if (!live || live.phase === 'idle' || !live.drawn?.length || roundIsOver(live)) {
+  if (!live || live.phase === 'idle' || live.phase === 'revealed' || !live.drawn?.length) {
     await doDraw();
     live = await get(`classes/${state.classId}/live/now`);
     if (!live?.drawn?.length) return;
   }
+
   const roundId = rid('round');
-  const questionNo = (live.questionNo || 0) + 1;
   state.teacherEntry = {};
+  state.chosen = [];
+
+  const seconds = questions.reduce((t, q) => t + (q.timeLimitSec || state.settings.timeLimitSec || 0), 0);
 
   await set(`classes/${state.classId}/rounds/${roundId}`, {
-    questionId: q.id,
+    questionIds: questions.map((q) => q.id),
     participants: live.drawn.map((d) => d.id),
     startedAt: Date.now()
   });
   await set(`classes/${state.classId}/live/now`, {
     phase: 'asking',
     roundId,
-    questionNo,
-    questionId: q.id,
-    question: q,
+    questions,
     results: null,
-    revealKey: null,
+    revealKeys: null,
+    classStat: null,
+    autoRevealed: false,
     startedAt: Date.now(),
-    endsAt: state.settings.timeLimitSec ? Date.now() + (q.timeLimitSec || state.settings.timeLimitSec) * 1000 : null,
+    endsAt: seconds ? Date.now() + seconds * 1000 : null,
     settings: state.settings
   });
   sfx.tick();
 }
 
-async function reveal() {
+/**
+ * Marks everything. Called by the teacher, or on its own when the clock runs
+ * out — waiting for someone to press a button while the class watches a dead
+ * timer helps nobody.
+ */
+async function reveal({ auto = false } = {}) {
   const live = state.live;
-  if (!live?.question) return;
-  const q = live.question;
-  const key = state.keys[q.id] || await get(`classes/${state.classId}/keys/${q.id}`);
-  if (!key) { toast('The answer key for this question is missing.', 'bad'); return; }
+  const qset = live?.questions || [];
+  if (!qset.length || live.phase === 'revealed') return;
 
   if (state.responseError) {
     toast('The answers cannot be read right now. Fix that before revealing, or everyone will be scored as wrong.', 'bad');
     return;
   }
-  if (state.settings.answerMode === 'devices') {
-    const silent = (live.drawn || []).filter((p) => !state.responses.some((r) => r.id === p.id));
-    if (silent.length && !confirm(
-      `${silent.map((p) => p.name).join(' and ')} ${silent.length > 1 ? 'have' : 'has'} not answered yet. ` +
-      'Revealing now scores them as wrong. Carry on?')) return;
+
+  const keys = {};
+  for (const q of qset) {
+    keys[q.id] = state.keys[q.id] || await get(`classes/${state.classId}/keys/${q.id}`);
+    if (!keys[q.id]) { toast(`The answer key for "${q.text.slice(0, 30)}" is missing.`, 'bad'); return; }
   }
 
-  const per = Math.max(1, live.questionsPerRound || 1);
-  const lastOfRound = (live.questionNo || 1) >= per;
+  if (!auto && state.settings.answerMode === 'devices') {
+    const short = (live.drawn || []).filter((p) => {
+      const r = state.responses.find((x) => x.id === p.id);
+      return Object.keys(r?.answers || {}).length < qset.length;
+    });
+    if (short.length && !confirm(
+      `${short.map((p) => p.name).join(' and ')} ${short.length > 1 ? 'have' : 'has'} not finished. ` +
+      'Anything unanswered is scored as wrong. Carry on?')) return;
+  }
 
   const results = [];
   for (const p of live.drawn || []) {
-    let answer = null, confidence = state.settings.rule === 'calibration' ? 50 : 1;
+    const fromPhone = state.responses.find((x) => x.id === p.id);
+    const typed = state.teacherEntry[p.id];
+    const perQuestion = [];
+    let total = 0, correctCount = 0;
 
-    if (state.settings.answerMode === 'teacher') {
-      const entry = state.teacherEntry[p.id];
-      if (entry) { answer = entry.answer; confidence = entry.confidence; }
-    } else {
-      const r = state.responses.find((x) => x.id === p.id);
-      if (r) { answer = r.answer; confidence = r.confidence; }
+    for (const q of qset) {
+      const answer = state.settings.answerMode === 'teacher'
+        ? typed?.answers?.[q.id] ?? null
+        : fromPhone?.answers?.[q.id] ?? null;
+      const confidence = (state.settings.answerMode === 'teacher'
+        ? typed?.confidence?.[q.id]
+        : fromPhone?.confidence?.[q.id]) ?? (state.settings.rule === 'calibration' ? 50 : 1);
+
+      const { fraction, correct } = grade(q, keys[q.id], answer);
+      const points = score(q, fraction, confidence, state.settings);
+      total = Math.round((total + points) * 10) / 10;
+      if (correct) correctCount++;
+      perQuestion.push({ questionId: q.id, answer, confidence, fraction, correct, points });
     }
-
-    const { fraction, correct } = grade(q, key, answer);
-    const points = score(q, fraction, confidence, state.settings);
-    results.push({
-      studentId: p.id, name: p.name, answer, fraction, correct, points,
-      tier: state.settings.rule === 'calibration' ? null : confidence,
-      confidencePct: state.settings.rule === 'calibration' ? confidence : confidence * 33
-    });
+    results.push({ studentId: p.id, name: p.name, total, correctCount, perQuestion });
   }
 
-  // score the students
   for (const r of results) {
     const s = state.students.find((x) => x.id === r.studentId);
     if (!s) continue;
-    const streak = r.correct ? (s.streak || 0) + 1 : 0;
+    const streak = r.correctCount === qset.length ? (s.streak || 0) + qset.length : 0;
     await set(`classes/${state.classId}/students/${r.studentId}`, {
-      score: round1((s.score || 0) + r.points),
-      turns: (s.turns || 0) + 1,
-      correct: (s.correct || 0) + (r.correct ? 1 : 0),
-      wrong: (s.wrong || 0) + (r.correct ? 0 : 1),
+      score: round1((s.score || 0) + r.total),
+      turns: (s.turns || 0) + qset.length,
+      correct: (s.correct || 0) + r.correctCount,
+      wrong: (s.wrong || 0) + (qset.length - r.correctCount),
       streak,
       bestStreak: Math.max(s.bestStreak || 0, streak),
-      resting: r.correct && state.settings.restOnCorrect && lastOfRound
-        ? true
-        : (s.resting || false),
+      resting: r.correctCount > 0 && state.settings.restOnCorrect ? true : (s.resting || false),
       lastRound: live.roundId
     });
-    await set(`classes/${state.classId}/results/${live.roundId}--${r.studentId}`, {
-      studentId: r.studentId, questionId: q.id, roundId: live.roundId,
-      topic: q.topic || null, difficulty: q.difficulty,
-      fraction: r.fraction, points: r.points,
-      tier: r.tier, confidencePct: r.confidencePct, at: Date.now()
-    });
+    for (const cell of r.perQuestion) {
+      await set(`classes/${state.classId}/results/${live.roundId}--${r.studentId}--${cell.questionId}`, {
+        studentId: r.studentId, questionId: cell.questionId, roundId: live.roundId,
+        topic: qset.find((q) => q.id === cell.questionId)?.topic || null,
+        difficulty: qset.find((q) => q.id === cell.questionId)?.difficulty,
+        fraction: cell.fraction, points: cell.points,
+        tier: state.settings.rule === 'calibration' ? null : cell.confidence,
+        confidencePct: state.settings.rule === 'calibration' ? cell.confidence : cell.confidence * 33,
+        at: Date.now()
+      });
+    }
   }
 
-  // everyone who answered along without being drawn
   let classStat = null;
   try {
     const shadow = await list(`classes/${state.classId}/rounds/${live.roundId}/shadow`);
     if (shadow.length) {
-      const right = shadow.filter((r) => grade(q, key, r.answer).correct).length;
-      classStat = { n: shadow.length, right };
+      let answers = 0, right = 0;
+      shadow.forEach((r) => qset.forEach((q) => {
+        if (r.answers?.[q.id] === undefined) return;
+        answers++;
+        if (grade(q, keys[q.id], r.answers[q.id]).correct) right++;
+      }));
+      if (answers) classStat = { answers, right, students: shadow.length };
     }
   } catch { /* nobody answered along */ }
 
-  // Anyone who got one right this round sits out afterwards, but not until
-  // the round has finished.
-  const earnedRest = state.settings.restOnCorrect
-    ? results.filter((r) => r.correct).map((r) => r.studentId)
-    : [];
-  const pendingRest = [...new Set([...(live.pendingRest || []), ...earnedRest])];
-
-  await set(`classes/${state.classId}/questions/${q.id}`, { asked: (q.asked || 0) + 1 });
+  for (const q of qset) {
+    await set(`classes/${state.classId}/questions/${q.id}`, { asked: (q.asked || 0) + 1 });
+  }
   await set(`classes/${state.classId}/live/now`, {
-    phase: 'revealed', results, revealKey: key, classStat, pendingRest
+    phase: 'revealed', results, revealKeys: keys, classStat, autoRevealed: auto
   });
 
   state.results = await list(`classes/${state.classId}/results`);
-  results.some((r) => r.correct) ? sfx.right() : sfx.wrong();
-}
-
-/** Every question the drawn students were going to face has been asked. */
-function roundIsOver(live) {
-  const per = Math.max(1, live.questionsPerRound || 1);
-  return live.phase === 'revealed' && (live.questionNo || 1) >= per;
-}
-
-function questionsLeft(live) {
-  const per = Math.max(1, live?.questionsPerRound || 1);
-  return Math.max(0, per - (live?.questionNo || 0));
-}
-
-/** Hands the same students their next question, keeping the round going. */
-async function nextQuestionSameStudents() {
-  await set(`classes/${state.classId}/live/now`, {
-    phase: 'drawn', question: null, questionId: null, roundId: null, results: null, revealKey: null
-  });
-  state.teacherEntry = {};
+  results.some((r) => r.correctCount) ? sfx.right() : sfx.wrong();
 }
 
 async function nextRound() {
-  // Sitting out is held back until the whole round is done, so nobody is
-  // pulled out of a round they are still in the middle of.
-  for (const id of state.live?.pendingRest || []) {
-    await set(`classes/${state.classId}/students/${id}`, { resting: true });
-  }
+  state.chosen = [];
   await set(`classes/${state.classId}/live/now`, {
-    phase: 'idle', drawn: [], results: null, question: null, questionId: null,
-    roundId: null, revealKey: null, questionNo: 0, pendingRest: []
+    phase: 'idle', drawn: [], results: null, questions: [], roundId: null,
+    revealKeys: null, classStat: null, autoRevealed: false, endsAt: null
   });
   state.teacherEntry = {};
 }
@@ -831,22 +934,28 @@ async function undoRound() {
   const live = state.live;
   if (!live?.results) return;
   if (!confirm('Take back the points from this round?')) return;
+  const qset = live.questions || [];
+
   for (const r of live.results) {
     const s = state.students.find((x) => x.id === r.studentId);
     if (!s) continue;
     await set(`classes/${state.classId}/students/${r.studentId}`, {
-      score: round1((s.score || 0) - r.points),
-      turns: Math.max(0, (s.turns || 0) - 1),
-      correct: Math.max(0, (s.correct || 0) - (r.correct ? 1 : 0)),
-      wrong: Math.max(0, (s.wrong || 0) - (r.correct ? 0 : 1)),
+      score: round1((s.score || 0) - r.total),
+      turns: Math.max(0, (s.turns || 0) - qset.length),
+      correct: Math.max(0, (s.correct || 0) - r.correctCount),
+      wrong: Math.max(0, (s.wrong || 0) - (qset.length - r.correctCount)),
       resting: false
     });
-    await del(`classes/${state.classId}/results/${live.roundId}--${r.studentId}`);
+    for (const cell of r.perQuestion || []) {
+      await del(`classes/${state.classId}/results/${live.roundId}--${r.studentId}--${cell.questionId}`);
+    }
   }
-  const q = state.questions.find((x) => x.id === live.questionId);
-  if (q) await set(`classes/${state.classId}/questions/${q.id}`, { asked: Math.max(0, (q.asked || 1) - 1) });
+  for (const q of qset) {
+    const current = state.questions.find((x) => x.id === q.id);
+    if (current) await set(`classes/${state.classId}/questions/${q.id}`, { asked: Math.max(0, (current.asked || 1) - 1) });
+  }
   state.results = await list(`classes/${state.classId}/results`);
-  await set(`classes/${state.classId}/live/now`, { phase: 'asking', results: null, revealKey: null });
+  await set(`classes/${state.classId}/live/now`, { phase: 'asking', results: null, revealKeys: null, autoRevealed: false });
   toast('Points taken back.');
 }
 
@@ -855,8 +964,6 @@ async function wakeAll() {
   for (const s of state.students.filter((x) => x.resting)) await wake(s.id);
   toast('Everyone is back in the draw.');
 }
-
-/* ---------- class list --------------------------------------------------- */
 
 function renderStudents() {
   const root = $('#sec-students');
@@ -1437,6 +1544,22 @@ function renderSettings() {
       ])
     ])
   ]));
+  draw.appendChild(el('h3', { style: 'margin-top:18px', text: 'How students join' }));
+  draw.appendChild(el('label', { class: 'check' }, [
+    el('input', { type: 'radio', name: 'join', checked: !s.lockToDevice, onchange: () => { s.lockToDevice = false; } }),
+    el('span', {}, [
+      el('strong', { text: 'They enter their student ID. ' }),
+      el('span', { class: 'muted', text: 'The name list does not show IDs, so picking a classmate\'s name gets them nowhere. A student who changes phone or clears their browser gets back in on their own.' })
+    ])
+  ]));
+  draw.appendChild(el('label', { class: 'check' }, [
+    el('input', { type: 'radio', name: 'join', checked: !!s.lockToDevice, onchange: () => { s.lockToDevice = true; } }),
+    el('span', {}, [
+      el('strong', { text: 'First phone to pick a name keeps it. ' }),
+      el('span', { class: 'muted', text: 'Nothing to remember and nothing to guess, but every changed or wiped phone needs you to press Release on the class list.' })
+    ])
+  ]));
+
   draw.appendChild(el('label', { class: 'check', style: 'margin-top:12px' }, [
     el('input', { type: 'checkbox', checked: s.restOnCorrect, onchange: (e) => { s.restOnCorrect = e.target.checked; } }),
     el('span', { text: 'A student who answers correctly sits out the next draws until you bring them back. With more than one question per round, this waits until the round is over.' })

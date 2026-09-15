@@ -26,6 +26,11 @@ export const DEFAULT_SETTINGS = {
   drawMode: 'fair',         // 'fair' favours students who have had fewer turns
   answerMode: 'devices',    // or 'teacher' — teacher types answers for the class
   restOnCorrect: true,
+  /* false: a student proves who they are with their student ID, and can move
+     to a new phone by entering it again.
+     true:  the first phone to pick a name keeps it, and only the teacher can
+            hand it over. Stricter, but every changed or wiped phone needs you. */
+  lockToDevice: false,
   timeLimitSec: 45,
   sound: true
 };

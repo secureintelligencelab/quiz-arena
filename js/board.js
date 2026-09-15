@@ -102,10 +102,7 @@ function idleScreen() {
 function drawnScreen(live) {
   const wrap = el('div', { class: 'board-grid' });
   const names = el('div', { class: 'spotlight' });
-  const per = Math.max(1, live.questionsPerRound || 1);
-  names.appendChild(el('div', { class: 'drum', text: per > 1
-    ? `Round ${live.roundNo || 1} — ${per} questions`
-    : `Round ${live.roundNo || 1}` }));
+  names.appendChild(el('div', { class: 'drum', text: `Round ${live.roundNo || 1}` }));
   (live.drawn || []).forEach((d, i) => {
     if (i) names.appendChild(el('div', { class: 'vs', text: 'and' }));
     names.appendChild(el('div', { class: 'name', text: d.name }));
@@ -115,32 +112,42 @@ function drawnScreen(live) {
 }
 
 function questionScreen(live) {
-  const q = live.question;
+  const set = live.questions || [];
   const wrap = el('div', { class: 'board-grid' });
   const main = el('div', { class: 'board-q' });
+  const revealed = live.phase === 'revealed';
 
   if (live.endsAt && live.phase === 'asking') main.appendChild(timerBar(live.endsAt, live.startedAt));
 
-  const per = Math.max(1, live.questionsPerRound || 1);
   main.appendChild(el('div', { class: 'board-label', text:
     (live.drawn || []).map((d) => d.name).join('   ·   ') +
-    (per > 1 ? `      question ${live.questionNo || 1} of ${per}` : '') }));
-  main.appendChild(el('div', { class: 'qtext', text: q.text }));
-  if (q.image) main.appendChild(el('img', { src: q.image, alt: '', style: 'max-height:32vh;border-radius:10px;margin-bottom:3vh' }));
+    (set.length > 1 ? `      ${set.length} questions` : '') }));
 
-  const key = live.phase === 'revealed' ? live.revealKey : null;
-  main.appendChild(choices(q, key));
+  // One question fills the screen. Several are stacked smaller, because the
+  // back row still has to read them.
+  const many = set.length > 1;
+  set.forEach((q, i) => {
+    const block = el('div', { style: many ? 'margin-bottom:2.4vh' : '' });
+    block.appendChild(el('div', {
+      class: 'qtext',
+      style: many ? 'font-size:clamp(1.1rem,2.1vw,2rem);max-width:34ch;margin-bottom:1.2vh' : '',
+      text: many ? `${i + 1}. ${q.text}` : q.text
+    }));
+    if (q.image && !many) block.appendChild(el('img', { src: q.image, alt: '', style: 'max-height:28vh;border-radius:10px;margin-bottom:2vh' }));
+    block.appendChild(choices(q, revealed ? (live.revealKeys || {})[q.id] : null, many));
+    if (revealed && q.explanation && !many) {
+      block.appendChild(el('p', { style: 'font-size:1.15rem;color:rgba(244,247,249,.72);max-width:52ch;margin-top:1.5vh', text: q.explanation }));
+    }
+    main.appendChild(block);
+  });
 
-  if (live.phase === 'revealed' && q.explanation) {
-    main.appendChild(el('p', { style: 'font-size:1.15rem;color:rgba(244,247,249,.72);max-width:52ch;margin-top:2vh', text: q.explanation }));
-  }
-  if (live.phase === 'revealed' && live.results) {
+  if (revealed && live.results) {
     main.appendChild(el('div', { class: 'row wrap', style: 'margin-top:2vh;gap:14px' },
       live.results.map((r) => el('div', {
         style: `padding:10px 18px;border-radius:12px;font-size:1.3rem;font-family:Archivo,sans-serif;font-weight:700;
-                background:${r.fraction === 1 ? 'rgba(35,194,149,.2)' : 'rgba(191,47,82,.22)'};
-                color:${r.fraction === 1 ? '#5fe0bb' : '#ff9db1'}`,
-        text: `${r.name}  ${r.points > 0 ? '+' : ''}${r.points}`
+                background:${r.correctCount ? 'rgba(35,194,149,.2)' : 'rgba(191,47,82,.22)'};
+                color:${r.correctCount ? '#5fe0bb' : '#ff9db1'}`,
+        text: `${r.name}  ${r.correctCount}/${set.length}  ${r.total > 0 ? '+' : ''}${r.total}`
       }))));
   }
 
@@ -148,8 +155,9 @@ function questionScreen(live) {
   root.appendChild(wrap);
 }
 
-function choices(q, key) {
+function choices(q, key, compact = false) {
   const box = el('div');
+  const small = compact ? 'padding:7px 14px;font-size:clamp(.8rem,1.1vw,1.05rem);margin-bottom:5px' : '';
   const mark = (i) => key && (
     q.type === 'true_false' ? key.answer === (i === 0 ? 'true' : 'false')
       : q.type === 'mcq_multi' ? (key.answer || []).includes(i)
@@ -157,7 +165,7 @@ function choices(q, key) {
 
   if (q.type === 'true_false' || q.type === 'mcq_single' || q.type === 'mcq_multi') {
     (q.options || []).forEach((o, i) => {
-      box.appendChild(el('div', { class: `board-opt ${mark(i) ? 'right' : ''}` }, [
+      box.appendChild(el('div', { class: `board-opt ${mark(i) ? 'right' : ''}`, style: small }, [
         el('span', { class: 'key', text: LETTERS[i] }),
         el('span', { text: o })
       ]));
@@ -232,9 +240,7 @@ function spin(live) {
   root.textContent = '';
   const wrap = el('div', { class: 'board-grid' });
   const stage = el('div', { class: 'spotlight' });
-  stage.appendChild(el('div', { class: 'drum', text: (live.questionsPerRound || 1) > 1
-    ? `Round ${live.roundNo || 1} — ${live.questionsPerRound} questions`
-    : `Round ${live.roundNo || 1}` }));
+  stage.appendChild(el('div', { class: 'drum', text: `Round ${live.roundNo || 1}` }));
 
   const slots = (live.drawn || []).map((d, i) => {
     if (i) stage.appendChild(el('div', { class: 'vs', text: 'and' }));
